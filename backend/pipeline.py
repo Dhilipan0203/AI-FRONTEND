@@ -1,20 +1,14 @@
 """
-pipeline.py — Token-optimised 3-stage research pipeline
+pipeline.py — 3-stage research pipeline (Groq backend)
 
-Optimizations vs previous version:
-  - Critic stage DISABLED (was doubling token usage with a second Gemini call)
-  - 429 quota errors bubble up immediately — no retry storm
-  - max_sources passed as 3 throughout
-  - logging reduced to warnings only
-  - _abort helper preserved for frontend compatibility
-
-Stage 1 — Search   (Tavily, cached)
+Stage 1 — Search   (Tavily, cached, 3 sources)
 Stage 2 — Content  (build_content, Tavily data only)
-Stage 3 — Writer   (single Gemini call, ≤5000 char input, ≤2048 token output)
-Stage 4 — Critic   DISABLED (re-enable when off free tier)
+Stage 3 — Writer   (single Groq call, ≤5000 char input, ≤2048 token output)
+Stage 4 — Critic   DISABLED (re-enable when needed — costs an extra LLM call)
+
+Rate-limit / 429 errors bubble up immediately — no retry storm.
 """
 
-import os
 import logging
 import time
 import traceback
@@ -22,15 +16,14 @@ from typing import Optional, Callable
 from pathlib import Path
 from dotenv import load_dotenv
 
-from agents import search_agent, build_content, generate_report, _is_quota_error, MAX_SOURCES
+from agents import search_agent, build_content, generate_report, _is_rate_limit_error, MAX_SOURCES
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=False)
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
-# Critic disabled — set True to re-enable once off free tier
-_CRITIC_ENABLED = False
+_CRITIC_ENABLED = False   # flip True to re-enable once you want the extra quality pass
 
 _CRITIC_DEFAULTS = {
     "strengths": [], "weaknesses": [], "hallucinations": [],
@@ -52,7 +45,7 @@ def run_research_pipeline(
     log_callback:  Optional[Callable[[str, str], None]] = None,
 ) -> dict:
     """
-    Run optimised 3-stage research pipeline. Always returns a dict, never raises.
+    Run 3-stage research pipeline. Always returns a dict, never raises.
     """
     _step = step_callback or _noop_step
     _log  = log_callback  or _noop_log
@@ -60,12 +53,12 @@ def run_research_pipeline(
     start = time.time()
     _log(f"Pipeline started: {query}", "info")
 
-    def _abort(reason: str, is_quota: bool = False) -> dict:
+    def _abort(reason: str, is_rate_limit: bool = False) -> dict:
         elapsed = round(time.time() - start, 2)
-        if is_quota:
+        if is_rate_limit:
             report = (
-                "**Quota limit reached.** The AI service has exhausted its free-tier allowance.\n\n"
-                "Please wait a few minutes and try again, or try a shorter query."
+                "**Rate limit reached.** The AI service is temporarily rate-limited.\n\n"
+                "Please wait 30–60 seconds and try again."
             )
         else:
             report = f"**Research failed:** {reason}"
@@ -124,19 +117,17 @@ def run_research_pipeline(
         report = generate_report(content, tuple(sources), query=query)
     except Exception:
         last_line = traceback.format_exc().splitlines()[-1]
-        is_quota  = _is_quota_error(last_line)
+        is_rl     = _is_rate_limit_error(last_line)
         _step("writer", "error")
-        return _abort("Report generation failed: " + last_line, is_quota=is_quota)
+        return _abort("Report generation failed: " + last_line, is_rate_limit=is_rl)
 
-    # Detect quota error surfaced as a graceful report string
     if not report.strip():
         report = f"# Research Report: {query}\n\nNo content generated."
 
     _step("writer", "done")
     _log("Report done.", "info")
 
-    # ── Stage 4: Critic — DISABLED to save quota ─────────────────────────────
-    # Re-enable by setting _CRITIC_ENABLED = True at the top of this file.
+    # ── Stage 4: Critic — DISABLED ────────────────────────────────────────────
     _step("critic", "running")
     review = _CRITIC_DEFAULTS.copy()
     _step("critic", "done")
@@ -149,7 +140,7 @@ def run_research_pipeline(
         "report":            report,
         "sources":           sources,
         "review":            review,
-        "processed_content": content[:1000],   # reduced from 2000
+        "processed_content": content[:1000],
         "metadata": {
             "source_count":       len(sources),
             "content_length":     len(content),

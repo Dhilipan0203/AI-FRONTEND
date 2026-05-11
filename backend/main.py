@@ -29,7 +29,7 @@ _log.info(".env path    : %s", _ENV_PATH)
 _log.info(".env exists  : %s", _ENV_PATH.exists())
 _log.info(".env loaded  : %s", _LOADED)
 _log.info("TAVILY_API_KEY  present : %s", bool(os.getenv("TAVILY_API_KEY")))
-_log.info("GOOGLE_API_KEY  present : %s", bool(os.getenv("GOOGLE_API_KEY")))
+_log.info("GROQ_API_KEY    present : %s", bool(os.getenv("GROQ_API_KEY")))
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
