@@ -1,0 +1,6 @@
+# Force text files to LF in the repo, UTF-8 on checkout
+* text=auto
+
+requirements.txt text eol=lf working-tree-encoding=UTF-8
+*.py text eol=lf working-tree-encoding=UTF-8
+Dockerfile text eol=lf
