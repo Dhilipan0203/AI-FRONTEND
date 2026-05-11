@@ -195,9 +195,10 @@ def generate_report(content: str, sources: tuple, query: str = "") -> str:
     try:
         llm = ChatGroq(
             model=GROQ_MODEL,
-            api_key=api_key,
+            groq_api_key=api_key,
             temperature=0.2,
             max_tokens=MAX_OUTPUT_TOKENS,
+            max_retries=1,
         )
 
         report = (llm | StrOutputParser()).invoke(prompt)
