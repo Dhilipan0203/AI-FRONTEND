@@ -452,7 +452,7 @@ function UserMessage({ msg }: { msg: Message }) {
 // ─── ColdStartCard ───────────────────────────────────────────────────────────
 
 function ColdStartCard({ onRetry }: { onRetry?: () => void }) {
-  const [secs, setSecs] = useState(50);
+  const [secs, setSecs] = useState(35);
   const [fired, setFired] = useState(false);
 
   useEffect(() => {
@@ -471,7 +471,7 @@ function ColdStartCard({ onRetry }: { onRetry?: () => void }) {
         <div className="flex-1">
           <p className="text-sm font-medium text-amber-300">Backend is waking up</p>
           <p className="text-xs text-amber-400/70 mt-0.5 leading-relaxed">
-            Render free tier sleeps after inactivity. Auto-retrying in <span className="font-bold text-amber-300">{secs}s</span>…
+            Server is waking up (usually 20–30s). Auto-retrying in <span className="font-bold text-amber-300">{secs}s</span>…
           </p>
         </div>
       </div>
@@ -479,7 +479,7 @@ function ColdStartCard({ onRetry }: { onRetry?: () => void }) {
       <div className="h-1 rounded-full bg-amber-500/10 overflow-hidden">
         <motion.div className="h-full rounded-full bg-amber-400/60"
           initial={{ width: "100%" }}
-          animate={{ width: `${(secs / 50) * 100}%` }}
+          animate={{ width: `${(secs / 35) * 100}%` }}
           transition={{ duration: 0.9, ease: "linear" }} />
       </div>
       {onRetry && (
