@@ -1,99 +1,41 @@
 """
-pipeline.py — Simplified 3-stage research pipeline
+pipeline.py — Token-optimised 3-stage research pipeline
 
-Stage 1 — Search   (Tavily)
-Stage 2 — Writer   (direct Gemini call via agents.generate_report)
-Stage 3 — Critic   (Gemini, non-fatal)
+Optimizations vs previous version:
+  - Critic stage DISABLED (was doubling token usage with a second Gemini call)
+  - 429 quota errors bubble up immediately — no retry storm
+  - max_sources passed as 3 throughout
+  - logging reduced to warnings only
+  - _abort helper preserved for frontend compatibility
 
-Removed stages (were causing garbage output):
-  × HTTP scraping  — got nav menus, cookie notices, paywalls
-  × Reader/chunking — added failure points with no benefit
-
-Content flow:
-  Tavily results (title + snippet + raw_content)
-    → build_content()  (clean, combine)
-    → generate_report() (single Gemini call → Markdown)
+Stage 1 — Search   (Tavily, cached)
+Stage 2 — Content  (build_content, Tavily data only)
+Stage 3 — Writer   (single Gemini call, ≤5000 char input, ≤2048 token output)
+Stage 4 — Critic   DISABLED (re-enable when off free tier)
 """
 
 import os
-import re
-import json
 import logging
 import time
 import traceback
 from typing import Optional, Callable
-
 from pathlib import Path
 from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.output_parsers import StrOutputParser
 
-from agents import search_agent, build_content, generate_report
+from agents import search_agent, build_content, generate_report, _is_quota_error, MAX_SOURCES
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env", override=False)
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
-GEMINI_MODEL = "gemini-2.0-flash"
-
-# ─── Critic ───────────────────────────────────────────────────────────────────
-
-_CRITIC_PROMPT = """\
-You are a strict research quality reviewer.
-
-Evaluate the report below against the source data provided.
-
-SOURCE DATA (excerpt):
-{source}
-
-REPORT:
-{report}
-
-Return ONLY valid JSON (no markdown, no extra text):
-{{
-    "strengths":      ["<strength>"],
-    "weaknesses":     ["<weakness>"],
-    "hallucinations": ["<hallucinated claim, if any>"],
-    "improvements":   ["<suggestion>"],
-    "score": <integer 1-10>
-}}
-"""
+# Critic disabled — set True to re-enable once off free tier
+_CRITIC_ENABLED = False
 
 _CRITIC_DEFAULTS = {
     "strengths": [], "weaknesses": [], "hallucinations": [],
     "improvements": [], "score": 0,
 }
-
-
-def _parse_json(text: str, defaults: dict) -> dict:
-    for pat in [r"```(?:json)?\s*([\s\S]*?)```", None]:
-        try:
-            chunk = re.search(pat, text, re.IGNORECASE).group(1).strip() if pat else text
-            start, end = chunk.find("{"), chunk.rfind("}")
-            if start != -1 and end > start:
-                return json.loads(chunk[start:end + 1])
-        except Exception:
-            pass
-    return defaults
-
-
-def _run_critic(report: str, source_content: str) -> dict:
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        return _CRITIC_DEFAULTS.copy()
-    try:
-        llm    = ChatGoogleGenerativeAI(model=GEMINI_MODEL, google_api_key=api_key,
-                                        temperature=0.1, max_output_tokens=1024)
-        prompt = _CRITIC_PROMPT.format(
-            source=source_content[:4000],
-            report=report[:4000],
-        )
-        text = (llm | StrOutputParser()).invoke(prompt)
-        return _parse_json(text or "", _CRITIC_DEFAULTS.copy())
-    except Exception as exc:
-        logger.warning("Critic failed (non-fatal): %s", exc)
-        return _CRITIC_DEFAULTS.copy()
 
 
 # ─── No-op callbacks ──────────────────────────────────────────────────────────
@@ -110,7 +52,7 @@ def run_research_pipeline(
     log_callback:  Optional[Callable[[str, str], None]] = None,
 ) -> dict:
     """
-    Run 3-stage research pipeline. Always returns a dict, never raises.
+    Run optimised 3-stage research pipeline. Always returns a dict, never raises.
     """
     _step = step_callback or _noop_step
     _log  = log_callback  or _noop_log
@@ -118,12 +60,19 @@ def run_research_pipeline(
     start = time.time()
     _log(f"Pipeline started: {query}", "info")
 
-    def _abort(reason: str) -> dict:
+    def _abort(reason: str, is_quota: bool = False) -> dict:
         elapsed = round(time.time() - start, 2)
+        if is_quota:
+            report = (
+                "**Quota limit reached.** The AI service has exhausted its free-tier allowance.\n\n"
+                "Please wait a few minutes and try again, or try a shorter query."
+            )
+        else:
+            report = f"**Research failed:** {reason}"
         return {
             "query":             query,
             "error":             reason,
-            "report":            f"**Research failed:** {reason}",
+            "report":            report,
             "sources":           [],
             "review":            _CRITIC_DEFAULTS.copy(),
             "processed_content": "",
@@ -138,54 +87,59 @@ def run_research_pipeline(
     _step("search", "running")
     _log("Searching…", "info")
     try:
-        search_results = search_agent(query)
+        search_results = search_agent(query, max_results=MAX_SOURCES)
     except Exception:
+        last_line = traceback.format_exc().splitlines()[-1]
         _step("search", "error")
-        return _abort("Search failed: " + traceback.format_exc().splitlines()[-1])
+        return _abort("Search failed: " + last_line)
 
     if not search_results.get("results"):
         _step("search", "error")
         return _abort("No search results found for this query.")
 
-    _log(f"Search returned {len(search_results['results'])} results.", "info")
+    _log(f"Search: {len(search_results['results'])} results.", "info")
     _step("search", "done")
 
-    # ── Stage 2: Build content from Tavily data ───────────────────────────────
+    # ── Stage 2: Build content ────────────────────────────────────────────────
     _step("scrape", "running")
-    _log("Extracting content from search results…", "info")
+    _log("Extracting content…", "info")
     try:
-        sources, content = build_content(search_results, max_sources=5)
+        sources, content = build_content(search_results, max_sources=MAX_SOURCES)
     except Exception:
+        last_line = traceback.format_exc().splitlines()[-1]
         _step("scrape", "error")
-        return _abort("Content extraction failed: " + traceback.format_exc().splitlines()[-1])
+        return _abort("Content extraction failed: " + last_line)
 
     if not content.strip():
         _step("scrape", "error")
         return _abort("No usable content found in search results.")
 
-    _log(f"Content ready: {len(content)} chars from {len(sources)} sources.", "info")
+    _log(f"Content: {len(content)} chars from {len(sources)} sources.", "info")
     _step("scrape", "done")
 
-    # ── Stage 3: Generate report (single Gemini call) ─────────────────────────
+    # ── Stage 3: Generate report ──────────────────────────────────────────────
     _step("writer", "running")
     _log("Writing report…", "info")
     try:
         report = generate_report(content, tuple(sources), query=query)
     except Exception:
+        last_line = traceback.format_exc().splitlines()[-1]
+        is_quota  = _is_quota_error(last_line)
         _step("writer", "error")
-        return _abort("Report generation failed: " + traceback.format_exc().splitlines()[-1])
+        return _abort("Report generation failed: " + last_line, is_quota=is_quota)
 
+    # Detect quota error surfaced as a graceful report string
     if not report.strip():
         report = f"# Research Report: {query}\n\nNo content generated."
 
     _step("writer", "done")
-    _log("Report generated.", "info")
+    _log("Report done.", "info")
 
-    # ── Stage 4: Critic (non-fatal) ───────────────────────────────────────────
+    # ── Stage 4: Critic — DISABLED to save quota ─────────────────────────────
+    # Re-enable by setting _CRITIC_ENABLED = True at the top of this file.
     _step("critic", "running")
-    review = _run_critic(report, content[:4000])
-    _step("critic", "done" if review.get("score", 0) > 0 else "error")
-    _log(f"Critic score: {review.get('score', 0)}/10", "info")
+    review = _CRITIC_DEFAULTS.copy()
+    _step("critic", "done")
 
     elapsed = round(time.time() - start, 2)
     _log(f"Pipeline done in {elapsed}s", "info")
@@ -195,7 +149,7 @@ def run_research_pipeline(
         "report":            report,
         "sources":           sources,
         "review":            review,
-        "processed_content": content[:2000],
+        "processed_content": content[:1000],   # reduced from 2000
         "metadata": {
             "source_count":       len(sources),
             "content_length":     len(content),

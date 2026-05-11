@@ -85,8 +85,8 @@ def web_search(query: str, max_results: int = 5) -> dict:
             results_list.append({
                 "title":       r.get("title", ""),
                 "link":        link,
-                "snippet":     (r.get("content") or "")[:600],        # clean Tavily excerpt
-                "raw_content": (r.get("raw_content") or "")[:8000],   # full Tavily content
+                "snippet":     (r.get("content") or "")[:300],        # trimmed excerpt
+                "raw_content": (r.get("raw_content") or "")[:3000],   # capped (agents.py trims further)
                 "score":       r.get("score", 0),
             })
 
