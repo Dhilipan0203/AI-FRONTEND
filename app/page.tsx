@@ -782,7 +782,7 @@ function SidebarContent({ collapsed, activeView, sessions, activeId, onNavigate,
         {!collapsed && (
           <>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 800, color: "var(--tx1)", letterSpacing: "-0.03em", fontFamily: "var(--display)", lineHeight: 1 }}>GENAI</div>
+              <div style={{ fontSize: 13, fontWeight: 800, color: "var(--tx1)", letterSpacing: "-0.03em", fontFamily: "var(--display)", lineHeight: 1 }}>ALPHA AI</div>
               <div style={{ fontSize: 9, color: "var(--tx5)", letterSpacing: "0.15em", textTransform: "uppercase", marginTop: 1 }}>Research</div>
             </div>
             {showClose && <button onClick={onClose} style={{ color: "var(--tx5)", background: "none", border: "none", cursor: "pointer", padding: 4 }}><X size={14} /></button>}
