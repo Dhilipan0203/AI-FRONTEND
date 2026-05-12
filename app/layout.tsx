@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Flux AI — Research Intelligence",
+  title: "ALPHA AI — Research Intelligence",
   description: "Multi-agent AI research platform powered by advanced language models.",
 };
 
